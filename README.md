@@ -37,5 +37,5 @@ cargo test
 配布用の `.app` と Apple Silicon 向け `.dmg` は次で生成できます。
 
 ```sh
-npm run build
+npm run build:mac:arm64
 ```
