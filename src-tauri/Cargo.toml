@@ -1,0 +1,25 @@
+[package]
+name = "pc-cleaner"
+version = "0.1.0"
+description = "Safe macOS cleanup utility"
+authors = ["ゴミよおさらば"]
+license = ""
+repository = ""
+edition = "2021"
+
+[lib]
+name = "pc_cleaner_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+trash = "5"
+walkdir = "2"
