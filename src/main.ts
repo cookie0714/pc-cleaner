@@ -2,9 +2,10 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import "./styles.css";
 
 type RiskLevel = "low" | "medium" | "high";
-type View = "home" | "results" | "cleanup" | "history" | "settings";
+type View = "home" | "results" | "system" | "documents" | "cleanup" | "history" | "settings";
 type DetailSort = "size" | "modified" | "path";
 type DetailFilter = "all" | "selected" | "unselected";
+type SystemDataSort = "size" | "modified" | "path";
 
 type AppSettings = {
   enabledCategories: string[];
@@ -58,6 +59,40 @@ type ScanResult = {
   totalBytes: number;
   totalFiles: number;
   categories: CategoryResult[];
+  errors: ScanError[];
+};
+
+type SystemDataItem = {
+  id: string;
+  path: string;
+  displayName: string;
+  bytes: number | null;
+  modifiedAt?: string | null;
+  itemType: "folder" | "file" | "other" | "unknown";
+  categoryId: string;
+  scanStatus: "readable" | "partial" | "unreadable";
+  message?: string | null;
+};
+
+type SystemDataCategory = {
+  id: string;
+  name: string;
+  description: string;
+  totalBytes: number;
+  totalItems: number;
+  unreadableItems: number;
+  roots: string[];
+  items: SystemDataItem[];
+};
+
+type SystemDataResult = {
+  id: string;
+  startedAt: string;
+  finishedAt: string;
+  totalBytes: number;
+  totalItems: number;
+  unreadableItems: number;
+  categories: SystemDataCategory[];
   errors: ScanError[];
 };
 
@@ -123,14 +158,22 @@ type AppState = {
 type UiState = {
   appState: AppState | null;
   scanResult: ScanResult | null;
+  systemDataResult: SystemDataResult | null;
+  documentDataResult: SystemDataResult | null;
   cleanupReport: CleanupReport | null;
   selectedItemIds: Set<string>;
   activeCategoryId: string | null;
+  activeSystemDataCategoryId: string | null;
+  activeDocumentDataCategoryId: string | null;
   view: View;
   sort: DetailSort;
   filter: DetailFilter;
+  systemSort: SystemDataSort;
+  documentSort: SystemDataSort;
   isLoading: boolean;
   isScanning: boolean;
+  isSystemDataScanning: boolean;
+  isDocumentDataScanning: boolean;
   isCleaning: boolean;
   confirmOpen: boolean;
   confirmTrashPermanent: boolean;
@@ -152,23 +195,37 @@ if (!app) {
 
 const appRoot = app;
 
+const configurableCategoryIds = ["user_cache", "logs", "trash"];
+const storageCategoryIds = ["document_data", "system_data"];
+const resultCategoryIds = [...configurableCategoryIds, ...storageCategoryIds];
+
 const categoryMeta: Record<string, { label: string; short: string }> = {
   user_cache: { label: "ユーザーキャッシュ", short: "キャッシュ" },
   logs: { label: "アプリケーションログ", short: "ログ" },
-  trash: { label: "ゴミ箱", short: "ゴミ箱" }
+  trash: { label: "ゴミ箱", short: "ゴミ箱" },
+  document_data: { label: "書類データ", short: "書類" },
+  system_data: { label: "システムデータ", short: "システム" }
 };
 
 const state: UiState = {
   appState: null,
   scanResult: null,
+  systemDataResult: null,
+  documentDataResult: null,
   cleanupReport: null,
   selectedItemIds: new Set(),
   activeCategoryId: null,
+  activeSystemDataCategoryId: null,
+  activeDocumentDataCategoryId: null,
   view: "home",
   sort: "size",
   filter: "all",
+  systemSort: "size",
+  documentSort: "size",
   isLoading: true,
   isScanning: false,
+  isSystemDataScanning: false,
+  isDocumentDataScanning: false,
   isCleaning: false,
   confirmOpen: false,
   confirmTrashPermanent: false,
@@ -222,13 +279,39 @@ async function handleAction(action: string | undefined, target: HTMLElement) {
     case "start-scan":
       await startScan();
       break;
+    case "start-system-scan":
+      await startSystemDataScan();
+      break;
+    case "start-document-scan":
+      await startDocumentDataScan();
+      break;
     case "select-category":
       state.activeCategoryId = target.dataset.category ?? state.activeCategoryId;
       state.view = "results";
       render();
       break;
+    case "select-system-category":
+      state.activeSystemDataCategoryId =
+        target.dataset.category ?? state.activeSystemDataCategoryId;
+      state.view = "system";
+      render();
+      break;
+    case "select-document-category":
+      state.activeDocumentDataCategoryId =
+        target.dataset.category ?? state.activeDocumentDataCategoryId;
+      state.view = "documents";
+      render();
+      break;
     case "set-sort":
       state.sort = (target.dataset.sort as DetailSort) ?? "size";
+      render();
+      break;
+    case "set-system-sort":
+      state.systemSort = (target.dataset.sort as SystemDataSort) ?? "size";
+      render();
+      break;
+    case "set-document-sort":
+      state.documentSort = (target.dataset.sort as SystemDataSort) ?? "size";
       render();
       break;
     case "set-filter":
@@ -338,6 +421,50 @@ async function startScan() {
     state.error = asMessage(error);
   } finally {
     state.isScanning = false;
+    render();
+  }
+}
+
+async function startSystemDataScan() {
+  state.isSystemDataScanning = true;
+  state.error = null;
+  state.confirmOpen = false;
+  state.view = "system";
+  render();
+
+  try {
+    const result = await command<SystemDataResult>("scan_system_data");
+    state.systemDataResult = result;
+    state.activeSystemDataCategoryId =
+      result.categories.find((category) => category.totalBytes > 0)?.id ??
+      result.categories[0]?.id ??
+      null;
+  } catch (error) {
+    state.error = asMessage(error);
+  } finally {
+    state.isSystemDataScanning = false;
+    render();
+  }
+}
+
+async function startDocumentDataScan() {
+  state.isDocumentDataScanning = true;
+  state.error = null;
+  state.confirmOpen = false;
+  state.view = "documents";
+  render();
+
+  try {
+    const result = await command<SystemDataResult>("scan_document_data");
+    state.documentDataResult = result;
+    state.activeDocumentDataCategoryId =
+      result.categories.find((category) => category.totalBytes > 0)?.id ??
+      result.categories[0]?.id ??
+      null;
+  } catch (error) {
+    state.error = asMessage(error);
+  } finally {
+    state.isDocumentDataScanning = false;
     render();
   }
 }
@@ -512,7 +639,11 @@ function render() {
     ? renderLoading()
     : state.isScanning
       ? renderScanning()
-      : renderView();
+      : state.isSystemDataScanning
+        ? renderSystemDataScanning()
+        : state.isDocumentDataScanning
+          ? renderDocumentDataScanning()
+          : renderView();
 
   appRoot.innerHTML = `
     <div class="app-shell">
@@ -577,10 +708,14 @@ function renderSidebarStatus() {
 
 function pageTitle() {
   if (state.isScanning) return "スキャン中";
+  if (state.isSystemDataScanning) return "システムデータをスキャン中";
+  if (state.isDocumentDataScanning) return "書類データをスキャン中";
   if (state.isCleaning) return "削除中";
   const titles: Record<View, string> = {
     home: "ホーム",
     results: "スキャン結果",
+    system: "システムデータ",
+    documents: "書類データ",
     cleanup: "削除完了",
     history: "削除履歴",
     settings: "設定"
@@ -594,6 +729,10 @@ function renderView() {
       return renderHome();
     case "results":
       return renderResults();
+    case "system":
+      return renderSystemData();
+    case "documents":
+      return renderDocumentData();
     case "cleanup":
       return renderCleanup();
     case "history":
@@ -620,6 +759,34 @@ function renderScanning() {
         <p class="eyebrow">Scan in progress</p>
         <h2>キャッシュ、ログ、ゴミ箱を確認しています</h2>
         <p>アクセスできない領域はスキップし、理由を結果に残します。</p>
+      </div>
+      <div class="progress-track"><span></span></div>
+    </div>
+  `;
+}
+
+function renderSystemDataScanning() {
+  return `
+    <div class="scan-state">
+      <div class="scan-pulse"></div>
+      <div>
+        <p class="eyebrow">System data scan</p>
+        <h2>システムデータの内訳を集計しています</h2>
+        <p>macOSのストレージ表示にある「システムデータ」相当の領域を、パスとサイズのメタデータだけで集計します。</p>
+      </div>
+      <div class="progress-track"><span></span></div>
+    </div>
+  `;
+}
+
+function renderDocumentDataScanning() {
+  return `
+    <div class="scan-state">
+      <div class="scan-pulse"></div>
+      <div>
+        <p class="eyebrow">Document data scan</p>
+        <h2>書類データの内訳を集計しています</h2>
+        <p>Documents、Desktop、Downloads、iCloud Driveなどを、パスとサイズのメタデータだけで集計します。</p>
       </div>
       <div class="progress-track"><span></span></div>
     </div>
@@ -673,17 +840,24 @@ function renderHome() {
     <section class="category-strip">
       <div class="section-title">
         <h2>スキャン対象</h2>
-        <p>${categories.length}カテゴリが有効です。</p>
+        <p>削除候補 ${categories.length}カテゴリと、追加カテゴリ ${storageCategoryIds.length}カテゴリを集計します。</p>
       </div>
       <div class="category-list compact">
-        ${Object.entries(categoryMeta)
-          .map(([id, meta]) => {
-            const enabled = categories.includes(id);
+        ${resultCategoryIds
+          .map((id) => {
+            const meta = categoryMeta[id];
+            const isStorageCategory = storageCategoryIds.includes(id);
+            const enabled = isStorageCategory || categories.includes(id);
             const summary = lastScan?.categories.find((category) => category.id === id);
+            const action = isStorageCategory
+              ? lastScan
+                ? `data-action="nav" data-view="results"`
+                : `data-action="start-scan"`
+              : `data-action="nav" data-view="settings"`;
             return `
-              <button class="category-row ${enabled ? "" : "is-muted"}" data-action="nav" data-view="settings">
+              <button class="category-row ${enabled ? "" : "is-muted"}" ${action}>
                 <span>${escapeHtml(meta.label)}</span>
-                <strong>${summary ? formatBytes(summary.totalBytes) : enabled ? "対象" : "無効"}</strong>
+                <strong>${summary ? formatBytes(summary.totalBytes) : isStorageCategory ? "集計" : enabled ? "対象" : "無効"}</strong>
               </button>
             `;
           })
@@ -737,11 +911,288 @@ function renderResults() {
   `;
 }
 
+function renderSystemData() {
+  const result = state.systemDataResult;
+  if (!result) {
+    return `
+      <div class="empty-state">
+        <p class="eyebrow">System data</p>
+        <h2>システムデータの内訳を表示</h2>
+        <p>macOSのストレージ表示にある「システムデータ」相当の領域を集計します。</p>
+        <button class="primary-action" data-action="start-system-scan">内訳をスキャン</button>
+      </div>
+    `;
+  }
+
+  const categories = [...result.categories].sort((a, b) => b.totalBytes - a.totalBytes);
+  const activeCategory =
+    categories.find((category) => category.id === state.activeSystemDataCategoryId) ??
+    categories.find((category) => category.totalBytes > 0) ??
+    categories[0];
+
+  return `
+    <div class="results-summary system-summary">
+      <div>
+        <p class="eyebrow">System data</p>
+        <h2>${formatBytes(result.totalBytes)} / ${result.totalItems}項目</h2>
+        <p>${formatDate(result.finishedAt)} に完了しました。</p>
+      </div>
+      <div class="delete-summary">
+        <span>読み取り不可</span>
+        <strong>${result.unreadableItems}件</strong>
+        <small>サイズ不明として内訳に表示</small>
+        <button class="primary-action" data-action="start-system-scan">再スキャン</button>
+      </div>
+    </div>
+
+    <div class="results-layout">
+      <section class="category-column">
+        ${categories.map(renderSystemCategoryRow).join("")}
+        ${result.errors.length > 0 ? renderSystemErrors(result.errors, result.categories) : ""}
+      </section>
+      <section class="details-column">
+        ${activeCategory ? renderSystemDetails(activeCategory) : renderNoSystemData()}
+      </section>
+    </div>
+  `;
+}
+
+function renderDocumentData() {
+  const result = state.documentDataResult;
+  if (!result) {
+    return `
+      <div class="empty-state">
+        <p class="eyebrow">Document data</p>
+        <h2>書類データの内訳を表示</h2>
+        <p>Documents、Desktop、Downloads、iCloud Driveなどのユーザーデータを集計します。</p>
+        <button class="primary-action" data-action="start-document-scan">内訳をスキャン</button>
+      </div>
+    `;
+  }
+
+  const categories = [...result.categories].sort((a, b) => b.totalBytes - a.totalBytes);
+  const activeCategory =
+    categories.find((category) => category.id === state.activeDocumentDataCategoryId) ??
+    categories.find((category) => category.totalBytes > 0) ??
+    categories[0];
+
+  return `
+    <div class="results-summary system-summary">
+      <div>
+        <p class="eyebrow">Document data</p>
+        <h2>${formatBytes(result.totalBytes)} / ${result.totalItems}項目</h2>
+        <p>${formatDate(result.finishedAt)} に完了しました。</p>
+      </div>
+      <div class="delete-summary">
+        <span>読み取り不可</span>
+        <strong>${result.unreadableItems}件</strong>
+        <small>削除候補には含めません</small>
+        <button class="primary-action" data-action="start-document-scan">再スキャン</button>
+      </div>
+    </div>
+
+    <div class="results-layout">
+      <section class="category-column">
+        ${categories.map(renderDocumentCategoryRow).join("")}
+        ${result.errors.length > 0 ? renderSystemErrors(result.errors, result.categories) : ""}
+      </section>
+      <section class="details-column">
+        ${activeCategory ? renderDocumentDetails(activeCategory) : renderNoDocumentData()}
+      </section>
+    </div>
+  `;
+}
+
+function renderSystemCategoryRow(category: SystemDataCategory) {
+  const active = category.id === state.activeSystemDataCategoryId ? "is-active" : "";
+
+  return `
+    <article class="category-card system-card ${active}" data-action="select-system-category" data-category="${category.id}">
+      <div class="category-card-main system-card-main">
+        <div>
+          <h3>${escapeHtml(category.name)}</h3>
+          <p>${escapeHtml(category.description)}</p>
+        </div>
+      </div>
+      <div class="category-card-meta">
+        <span class="risk risk-low">${category.roots.length}領域</span>
+        <strong>${formatBytes(category.totalBytes)}</strong>
+        <small>${category.totalItems}項目${category.unreadableItems > 0 ? ` / 読み取り不可 ${category.unreadableItems}件` : ""}</small>
+      </div>
+    </article>
+  `;
+}
+
+function renderDocumentCategoryRow(category: SystemDataCategory) {
+  const active = category.id === state.activeDocumentDataCategoryId ? "is-active" : "";
+
+  return `
+    <article class="category-card system-card ${active}" data-action="select-document-category" data-category="${category.id}">
+      <div class="category-card-main system-card-main">
+        <div>
+          <h3>${escapeHtml(category.name)}</h3>
+          <p>${escapeHtml(category.description)}</p>
+        </div>
+      </div>
+      <div class="category-card-meta">
+        <span class="risk risk-medium">${category.roots.length}領域</span>
+        <strong>${formatBytes(category.totalBytes)}</strong>
+        <small>${category.totalItems}項目${category.unreadableItems > 0 ? ` / 読み取り不可 ${category.unreadableItems}件` : ""}</small>
+      </div>
+    </article>
+  `;
+}
+
+function renderSystemDetails(category: SystemDataCategory) {
+  const items = sortedSystemItems(category.items);
+  const hiddenCount = Math.max(0, category.totalItems - category.items.length);
+
+  return `
+    <div class="details-header">
+      <div>
+        <p class="eyebrow">Breakdown</p>
+        <h2>${escapeHtml(category.name)}</h2>
+      </div>
+      <div class="segmented">
+        ${systemSegmentButton("size", "サイズ")}
+        ${systemSegmentButton("modified", "更新日")}
+        ${systemSegmentButton("path", "パス")}
+      </div>
+    </div>
+    <div class="system-root-list">
+      ${category.roots.map((root) => `<span title="${escapeAttr(root)}">${escapeHtml(shortPath(root))}</span>`).join("")}
+    </div>
+    <div class="toolbar-line">
+      <span>${items.length}件を表示</span>
+      <span>${formatBytes(category.totalBytes)}${category.unreadableItems > 0 ? ` / 不明 ${category.unreadableItems}件` : ""}</span>
+    </div>
+    <div class="file-table">
+      <div class="file-row file-head system-item-row">
+        <span>項目</span>
+        <span>サイズ</span>
+        <span>更新日</span>
+        <span></span>
+      </div>
+      ${
+        items.length > 0
+          ? items.map(renderSystemItemRow).join("")
+          : `<div class="table-empty">表示できる項目はありません。</div>`
+      }
+    </div>
+    ${hiddenCount > 0 ? `<p class="table-note">表示を軽くするため、サイズ上位250件を表示しています。ほか ${hiddenCount} 件があります。</p>` : ""}
+  `;
+}
+
+function renderDocumentDetails(category: SystemDataCategory) {
+  const items = sortedDocumentItems(category.items);
+  const hiddenCount = Math.max(0, category.totalItems - category.items.length);
+
+  return `
+    <div class="details-header">
+      <div>
+        <p class="eyebrow">Breakdown</p>
+        <h2>${escapeHtml(category.name)}</h2>
+      </div>
+      <div class="segmented">
+        ${documentSegmentButton("size", "サイズ")}
+        ${documentSegmentButton("modified", "更新日")}
+        ${documentSegmentButton("path", "パス")}
+      </div>
+    </div>
+    <div class="system-root-list">
+      ${category.roots.map((root) => `<span title="${escapeAttr(root)}">${escapeHtml(shortPath(root))}</span>`).join("")}
+    </div>
+    <div class="toolbar-line">
+      <span>${items.length}件を表示</span>
+      <span>${formatBytes(category.totalBytes)}${category.unreadableItems > 0 ? ` / 不明 ${category.unreadableItems}件` : ""}</span>
+    </div>
+    <div class="file-table">
+      <div class="file-row file-head system-item-row">
+        <span>項目</span>
+        <span>サイズ</span>
+        <span>更新日</span>
+        <span></span>
+      </div>
+      ${
+        items.length > 0
+          ? items.map(renderSystemItemRow).join("")
+          : `<div class="table-empty">表示できる項目はありません。</div>`
+      }
+    </div>
+    ${hiddenCount > 0 ? `<p class="table-note">表示を軽くするため、サイズ上位250件を表示しています。ほか ${hiddenCount} 件があります。</p>` : ""}
+  `;
+}
+
+function renderSystemItemRow(item: SystemDataItem) {
+  return `
+    <div class="file-row system-item-row">
+      <div class="path-cell">
+        <strong>${escapeHtml(item.displayName)}</strong>
+        <span title="${escapeAttr(item.path)}">${escapeHtml(item.path)}</span>
+        <em class="${item.scanStatus === "readable" ? "" : "is-warning"}">${escapeHtml(systemItemNote(item))}</em>
+      </div>
+      <span>${formatSystemBytes(item.bytes)}</span>
+      <span>${formatSystemDate(item.modifiedAt)}</span>
+      <button class="icon-button" data-action="open-finder" data-path="${escapeAttr(item.path)}" title="Finderで表示">表示</button>
+    </div>
+  `;
+}
+
+function renderNoDocumentData() {
+  return `
+    <div class="empty-state">
+      <h2>表示できる書類データがありません</h2>
+      <p>ファイルが存在しないか、権限によって一部の領域を読み取れない場合があります。</p>
+      <button class="secondary-action" data-action="start-document-scan">再スキャン</button>
+    </div>
+  `;
+}
+
+function renderNoSystemData() {
+  return `
+    <div class="empty-state">
+      <h2>表示できるシステムデータがありません</h2>
+      <p>権限や環境によって、一部の領域は読み取れない場合があります。</p>
+      <button class="secondary-action" data-action="start-system-scan">再スキャン</button>
+    </div>
+  `;
+}
+
+function renderSystemErrors(errors: ScanError[], categories: SystemDataCategory[]) {
+  return `
+    <div class="scan-errors">
+      <h3>読み取れなかった項目</h3>
+      ${errors
+        .slice(0, 6)
+        .map((error) => {
+          const categoryName =
+            categories.find((category) => category.id === error.categoryId)?.name ??
+            error.categoryId;
+          return `
+            <p>
+              <strong>${escapeHtml(categoryName)}</strong>
+              <span title="${escapeAttr(error.path)}">${escapeHtml(shortPath(error.path))}</span>
+              <small>${escapeHtml(error.message)}</small>
+            </p>
+          `;
+        })
+        .join("")}
+      ${errors.length > 6 ? `<small>ほか ${errors.length - 6}件</small>` : ""}
+    </div>
+  `;
+}
+
 function renderCategoryRow(category: CategoryResult) {
   const selectedCount = category.items.filter((item) => state.selectedItemIds.has(item.id)).length;
   const deletableCount = category.items.filter((item) => item.deletable).length;
-  const checked = deletableCount > 0 && selectedCount === deletableCount;
+  const selectable = deletableCount > 0;
+  const checked = selectable && selectedCount === deletableCount;
   const active = category.id === state.activeCategoryId ? "is-active" : "";
+  const statusLabel = selectable ? riskLabel(category.riskLevel) : "選択不可";
+  const statusClass = selectable ? `risk-${category.riskLevel}` : "risk-locked";
+  const itemSummary = selectable
+    ? `${selectedCount}/${category.totalFiles}件 選択`
+    : `${category.totalFiles}件 / 削除不可`;
 
   return `
     <article class="category-card ${active}" data-action="select-category" data-category="${category.id}">
@@ -751,7 +1202,7 @@ function renderCategoryRow(category: CategoryResult) {
           data-action="category-toggle"
           data-category="${category.id}"
           ${checked ? "checked" : ""}
-          ${deletableCount === 0 ? "disabled" : ""}
+          ${!selectable ? "disabled" : ""}
           aria-label="${escapeAttr(category.name)}を選択"
         />
         <div>
@@ -760,17 +1211,19 @@ function renderCategoryRow(category: CategoryResult) {
         </div>
       </div>
       <div class="category-card-meta">
-        <span class="risk risk-${category.riskLevel}">${riskLabel(category.riskLevel)}</span>
+        <span class="risk ${statusClass}">${statusLabel}</span>
         <strong>${formatBytes(category.totalBytes)}</strong>
-        <small>${selectedCount}/${category.totalFiles}件 選択</small>
+        <small>${itemSummary}</small>
       </div>
     </article>
   `;
 }
 
 function renderDetails(category: CategoryResult) {
-  const items = sortedItems(filteredItems(category.items));
+  const isLocked = category.items.length > 0 && category.items.every((item) => !item.deletable);
+  const items = sortedItems(isLocked ? category.items : filteredItems(category.items));
   const limited = items.slice(0, 300);
+  const hiddenCount = Math.max(0, category.totalFiles - category.items.length);
 
   return `
     <div class="details-header">
@@ -778,11 +1231,15 @@ function renderDetails(category: CategoryResult) {
         <p class="eyebrow">Details</p>
         <h2>${escapeHtml(category.name)}</h2>
       </div>
-      <div class="segmented">
-        ${segmentButton("set-filter", "all", "全て", state.filter)}
-        ${segmentButton("set-filter", "selected", "選択済み", state.filter)}
-        ${segmentButton("set-filter", "unselected", "未選択", state.filter)}
-      </div>
+      ${
+        isLocked
+          ? `<span class="risk risk-locked">選択不可</span>`
+          : `<div class="segmented">
+              ${segmentButton("set-filter", "all", "全て", state.filter)}
+              ${segmentButton("set-filter", "selected", "選択済み", state.filter)}
+              ${segmentButton("set-filter", "unselected", "未選択", state.filter)}
+            </div>`
+      }
     </div>
     <div class="toolbar-line">
       <span>${items.length}件を表示</span>
@@ -807,6 +1264,7 @@ function renderDetails(category: CategoryResult) {
       }
     </div>
     ${items.length > limited.length ? `<p class="table-note">表示を軽くするため、先頭300件までを表示しています。選択状態は全件に反映されます。</p>` : ""}
+    ${hiddenCount > 0 ? `<p class="table-note">カテゴリ全体では ${category.totalFiles} 件を検出しました。表示はサイズ上位の項目に絞っています。</p>` : ""}
   `;
 }
 
@@ -1018,9 +1476,11 @@ function renderSettings() {
           <p>カテゴリ単位でオン/オフできます。</p>
         </div>
         <div class="toggle-list">
-          ${Object.entries(categoryMeta)
+          ${configurableCategoryIds
             .map(
-              ([id, meta]) => `
+              (id) => {
+                const meta = categoryMeta[id];
+                return `
                 <label class="toggle-row">
                   <span>
                     <strong>${escapeHtml(meta.label)}</strong>
@@ -1028,7 +1488,8 @@ function renderSettings() {
                   </span>
                   <input type="checkbox" data-action="settings-category" data-category="${id}" ${draft.enabledCategories.includes(id) ? "checked" : ""} />
                 </label>
-              `
+              `;
+              }
             )
             .join("")}
         </div>
@@ -1072,6 +1533,22 @@ function segmentButton(action: string, value: string, label: string, activeValue
   `;
 }
 
+function systemSegmentButton(value: SystemDataSort, label: string) {
+  return `
+    <button class="${value === state.systemSort ? "is-active" : ""}" data-action="set-system-sort" data-sort="${value}">
+      ${label}
+    </button>
+  `;
+}
+
+function documentSegmentButton(value: SystemDataSort, label: string) {
+  return `
+    <button class="${value === state.documentSort ? "is-active" : ""}" data-action="set-document-sort" data-sort="${value}">
+      ${label}
+    </button>
+  `;
+}
+
 function filteredItems(items: CleanableItem[]) {
   if (state.filter === "selected") {
     return items.filter((item) => state.selectedItemIds.has(item.id));
@@ -1092,10 +1569,46 @@ function sortedItems(items: CleanableItem[]) {
   });
 }
 
+function sortedSystemItems(items: SystemDataItem[]) {
+  return sortedDataItems(items, state.systemSort);
+}
+
+function sortedDocumentItems(items: SystemDataItem[]) {
+  return sortedDataItems(items, state.documentSort);
+}
+
+function sortedDataItems(items: SystemDataItem[], sort: SystemDataSort) {
+  return [...items].sort((a, b) => {
+    if (sort === "path") return a.path.localeCompare(b.path);
+    if (sort === "modified") {
+      return dateValue(b.modifiedAt) - dateValue(a.modifiedAt);
+    }
+    return systemByteValue(b.bytes) - systemByteValue(a.bytes);
+  });
+}
+
 function settingsDescription(id: string) {
   if (id === "user_cache") return "ユーザー領域の ~/Library/Caches";
   if (id === "logs") return "ユーザー領域の ~/Library/Logs";
   return " ~/.Trash の直下項目";
+}
+
+function systemItemKindLabel(kind: SystemDataItem["itemType"]) {
+  if (kind === "folder") return "フォルダ";
+  if (kind === "file") return "ファイル";
+  if (kind === "unknown") return "種別不明";
+  return "その他";
+}
+
+function systemItemNote(item: SystemDataItem) {
+  const kind = systemItemKindLabel(item.itemType);
+  if (item.scanStatus === "partial") {
+    return item.message ? `一部読み取り不可 - ${item.message}` : `一部読み取り不可 - ${kind}`;
+  }
+  if (item.scanStatus === "unreadable") {
+    return item.message ? `読み取り不可 - ${item.message}` : `読み取り不可 - ${kind}`;
+  }
+  return kind;
 }
 
 function renderError(message: string) {
@@ -1130,6 +1643,10 @@ function formatBytes(bytes: number) {
   return `${value.toFixed(digits)} ${units[index]}`;
 }
 
+function formatSystemBytes(bytes: number | null | undefined) {
+  return bytes == null ? "不明" : formatBytes(bytes);
+}
+
 function formatDate(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "-";
@@ -1137,6 +1654,20 @@ function formatDate(value: string) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(date);
+}
+
+function formatSystemDate(value: string | null | undefined) {
+  return value ? formatDate(value) : "-";
+}
+
+function systemByteValue(bytes: number | null | undefined) {
+  return bytes ?? -1;
+}
+
+function dateValue(value: string | null | undefined) {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
 }
 
 function shortPath(path: string) {
@@ -1180,13 +1711,26 @@ async function command<T>(name: string, args?: Record<string, unknown>): Promise
 }
 
 async function mockCommand<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  await new Promise((resolve) => window.setTimeout(resolve, name === "scan_categories" ? 900 : 150));
+  await new Promise((resolve) =>
+    window.setTimeout(
+      resolve,
+      name === "scan_categories" || name === "scan_system_data" || name === "scan_document_data"
+        ? 900
+        : 150
+    )
+  );
 
   if (name === "get_app_state") {
     return mockAppState() as T;
   }
   if (name === "scan_categories") {
     return mockScanResult() as T;
+  }
+  if (name === "scan_system_data") {
+    return mockSystemDataResult() as T;
+  }
+  if (name === "scan_document_data") {
+    return mockDocumentDataResult() as T;
   }
   if (name === "save_settings") {
     return (args?.settings ?? mockAppState().settings) as T;
@@ -1258,7 +1802,21 @@ function mockScanResult(): ScanResult {
   const categories: CategoryResult[] = [
     mockCategory("user_cache", "ユーザーキャッシュ", "アプリが再生成できるユーザー領域の一時データです。", "low", 14),
     mockCategory("logs", "アプリケーションログ", "ユーザー領域に保存されたログです。", "low", 9),
-    mockCategory("trash", "ゴミ箱", "ゴミ箱内の項目です。削除時は追加確認のうえ完全削除します。", "medium", 5)
+    mockCategory("trash", "ゴミ箱", "ゴミ箱内の項目です。削除時は追加確認のうえ完全削除します。", "medium", 5),
+    mockStorageCategory(
+      "document_data",
+      "書類データ",
+      "Documents、Desktop、Downloads、iCloud Driveなどのユーザーデータを集計します。",
+      "medium",
+      mockDocumentDataResult()
+    ),
+    mockStorageCategory(
+      "system_data",
+      "システムデータ",
+      "macOSのストレージ表示にある「システムデータ」相当の領域を集計します。",
+      "high",
+      mockSystemDataResult()
+    )
   ];
   return {
     id: "mock-scan",
@@ -1268,6 +1826,160 @@ function mockScanResult(): ScanResult {
     totalFiles: categories.reduce((sum, category) => sum + category.totalFiles, 0),
     categories,
     errors: []
+  };
+}
+
+function mockStorageCategory(
+  id: string,
+  name: string,
+  description: string,
+  riskLevel: RiskLevel,
+  result: SystemDataResult
+): CategoryResult {
+  const now = new Date().toISOString();
+  const sourceNames = new Map(result.categories.map((category) => [category.id, category.name]));
+  const items = result.categories.flatMap((category) =>
+    category.items.map((item) => {
+      const modifiedAt = item.modifiedAt ?? now;
+      const sourceName = sourceNames.get(item.categoryId) ?? category.name;
+      const deletable = item.scanStatus !== "unreadable" && item.bytes != null;
+      return {
+        id: `${id}-${item.id}`,
+        path: item.path,
+        displayName: item.displayName,
+        bytes: item.bytes ?? 0,
+        modifiedAt,
+        accessedAt: modifiedAt,
+        categoryId: id,
+        selected: false,
+        deletable,
+        warning:
+          item.scanStatus === "readable"
+            ? `${sourceName} / 必要なものを確認してから削除してください。`
+            : `${sourceName} / ${item.message ?? "読み取れない項目があります。"}`
+      } satisfies CleanableItem;
+    })
+  );
+
+  return {
+    id,
+    name,
+    description,
+    riskLevel,
+    totalBytes: result.totalBytes,
+    totalFiles: result.totalItems,
+    defaultSelected: false,
+    items
+  };
+}
+
+function mockSystemDataResult(): SystemDataResult {
+  const now = new Date().toISOString();
+  const categories: SystemDataCategory[] = [
+    mockSystemCategory(
+      "app_support_data",
+      "アプリ補助データ",
+      "アプリ本体ではなく、アプリが裏側で保持する補助データやコンテナです。",
+      "~/Library/Application Support",
+      11,
+      42
+    ),
+    mockSystemCategory(
+      "system_caches",
+      "キャッシュ",
+      "macOSのシステムデータに含まれやすいキャッシュです。",
+      "~/Library/Caches",
+      9,
+      28
+    ),
+    mockSystemCategory(
+      "temporary_runtime",
+      "一時・実行時領域",
+      "一時ファイル、ソケット、ユーザーセッション中の実行時データです。",
+      "/private/var/folders",
+      7,
+      16
+    ),
+    mockSystemCategory(
+      "system_runtime",
+      "システム実行領域",
+      "仮想メモリ、システムDB、共有キャッシュなどmacOSが管理するデータです。",
+      "/private/var/vm",
+      8,
+      23
+    )
+  ];
+
+  return {
+    id: "mock-system-data",
+    startedAt: now,
+    finishedAt: now,
+    totalBytes: categories.reduce((sum, category) => sum + category.totalBytes, 0),
+    totalItems: categories.reduce((sum, category) => sum + category.totalItems, 0),
+    unreadableItems: categories.reduce((sum, category) => sum + category.unreadableItems, 0),
+    categories,
+    errors: [
+      {
+        categoryId: "system_runtime",
+        path: "/private/var/vm/swapfile0",
+        message: "Permission denied"
+      }
+    ]
+  };
+}
+
+function mockDocumentDataResult(): SystemDataResult {
+  const now = new Date().toISOString();
+  const categories: SystemDataCategory[] = [
+    mockSystemCategory(
+      "documents_folder",
+      "書類",
+      "ユーザーのDocumentsフォルダにある文書、PDF、プロジェクト資料などです。",
+      "~/Documents",
+      12,
+      58
+    ),
+    mockSystemCategory(
+      "downloads_files",
+      "ダウンロード",
+      "ダウンロードフォルダに残っているファイル、アーカイブ、インストーラです。",
+      "~/Downloads",
+      10,
+      43
+    ),
+    mockSystemCategory(
+      "desktop_files",
+      "デスクトップ",
+      "デスクトップに置かれたファイルやフォルダです。",
+      "~/Desktop",
+      6,
+      19
+    ),
+    mockSystemCategory(
+      "icloud_drive_documents",
+      "iCloud Drive",
+      "iCloud Driveに同期される書類やフォルダです。ローカルに存在する範囲を集計します。",
+      "~/Library/Mobile Documents/com~apple~CloudDocs",
+      8,
+      31
+    )
+  ];
+
+  return {
+    id: "mock-document-data",
+    startedAt: now,
+    finishedAt: now,
+    totalBytes: categories.reduce((sum, category) => sum + category.totalBytes, 0),
+    totalItems: categories.reduce((sum, category) => sum + category.totalItems, 0),
+    unreadableItems: categories.reduce((sum, category) => sum + category.unreadableItems, 0),
+    categories,
+    errors: [
+      {
+        categoryId: "icloud_drive_documents",
+        path: "/Users/example/Library/Mobile Documents/com~apple~CloudDocs/Placeholder.pdf",
+        message: "ローカルに未ダウンロードのためサイズを確認できません"
+      }
+    ]
   };
 }
 
@@ -1307,4 +2019,69 @@ function mockCategory(
     defaultSelected: true,
     items
   };
+}
+
+function mockSystemCategory(
+  id: string,
+  name: string,
+  description: string,
+  root: string,
+  visibleItems: number,
+  totalItems: number
+): SystemDataCategory {
+  const homeRoot = root.replace(/^~/, "/Users/example");
+  const items = Array.from({ length: visibleItems }, (_, index) => {
+    const bytes = (visibleItems - index) * 220 * 1024 ** 2;
+    const path = `${homeRoot}/${mockSystemItemName(id, index)}`;
+    return {
+      id: `system-${id}-${index}`,
+      path,
+      displayName: path.split("/").slice(-1)[0] ?? path,
+      bytes,
+      modifiedAt: new Date(Date.now() - index * 86400000).toISOString(),
+      itemType: index % 5 === 0 ? "file" : "folder",
+      categoryId: id,
+      scanStatus: "readable",
+      message: null
+    } satisfies SystemDataItem;
+  });
+  const unreadable = {
+    id: `system-${id}-unreadable`,
+    path: `${homeRoot}/Protected Item`,
+    displayName: "Protected Item",
+    bytes: null,
+    modifiedAt: null,
+    itemType: "unknown",
+    categoryId: id,
+    scanStatus: "unreadable",
+    message: "Operation not permitted"
+  } satisfies SystemDataItem;
+  const allItems = [...items, unreadable];
+
+  return {
+    id,
+    name,
+    description,
+    totalBytes: allItems.reduce((sum, item) => sum + (item.bytes ?? 0), 0) + 340 * 1024 ** 2,
+    totalItems: totalItems + 1,
+    unreadableItems: 1,
+    roots: [homeRoot],
+    items: allItems
+  };
+}
+
+function mockSystemItemName(categoryId: string, index: number) {
+  const names: Record<string, string[]> = {
+    app_support_data: ["Google", "MobileSync", "Slack", "Code", "Notion"],
+    system_caches: ["com.apple.Safari", "CloudKit", "com.apple.iconservices", "systemstats", "assets"],
+    temporary_runtime: ["T", "C", "Cleanup At Startup", "TemporaryItems", "com.apple.launchd"],
+    system_runtime: ["swapfile0", "sleepimage", "dyld", "uuidtext", "diagnostics"],
+    documents_folder: ["Tax Return.pdf", "Project Brief.docx", "Invoices", "Research Notes", "Archive.zip"],
+    downloads_files: ["Installer.dmg", "Export.zip", "Statement.pdf", "Meeting Recording", "Design Assets"],
+    desktop_files: ["Screenshot.png", "Draft.pages", "Untitled Folder", "Presentation.key", "Receipt.pdf"],
+    icloud_drive_documents: ["Shared Proposal.pdf", "Client Files", "Scans", "Numbers Budget", "Legal"],
+    shared_documents: ["Team Archive", "Shared PDF", "Public Export", "Reference", "Installers"]
+  };
+  const pool = names[categoryId] ?? ["Item"];
+  return `${pool[index % pool.length]}-${index + 1}`;
 }

@@ -13,6 +13,9 @@ use std::time::SystemTime;
 use tauri::{AppHandle, Manager};
 use walkdir::{DirEntry, WalkDir};
 
+const MAX_VISIBLE_SYSTEM_ITEMS: usize = 250;
+const MAX_SYSTEM_SCAN_ERRORS: usize = 120;
+
 #[derive(Clone, Copy)]
 enum ScanMode {
     RecursiveFiles,
@@ -28,6 +31,14 @@ struct CategoryDefinition {
     default_selected: bool,
     root: PathBuf,
     scan_mode: ScanMode,
+}
+
+#[derive(Clone)]
+struct SystemDataDefinition {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -79,6 +90,46 @@ struct ScanError {
     category_id: String,
     path: String,
     message: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDataItem {
+    id: String,
+    path: String,
+    display_name: String,
+    bytes: Option<u64>,
+    modified_at: Option<String>,
+    item_type: String,
+    category_id: String,
+    scan_status: String,
+    message: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDataCategory {
+    id: String,
+    name: String,
+    description: String,
+    total_bytes: u64,
+    total_items: usize,
+    unreadable_items: usize,
+    roots: Vec<String>,
+    items: Vec<SystemDataItem>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDataResult {
+    id: String,
+    started_at: String,
+    finished_at: String,
+    total_bytes: u64,
+    total_items: usize,
+    unreadable_items: usize,
+    categories: Vec<SystemDataCategory>,
+    errors: Vec<ScanError>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -279,6 +330,24 @@ fn scan_categories(app: AppHandle) -> Result<ScanResult, String> {
         };
         categories.push(result);
     }
+    categories.push(scan_storage_data_category(
+        document_data_definitions(),
+        "document_data",
+        "書類データ",
+        "Documents、Desktop、Downloads、iCloud Driveなどのユーザーデータを集計します。",
+        RiskLevel::Medium,
+        "書類データです。必要なものを確認してから削除してください。",
+        &mut errors,
+    ));
+    categories.push(scan_storage_data_category(
+        system_data_definitions(),
+        "system_data",
+        "システムデータ",
+        "macOSのストレージ表示にある「システムデータ」相当の領域を集計します。",
+        RiskLevel::High,
+        "システムデータです。アプリやmacOSに影響する可能性があるため慎重に確認してください。",
+        &mut errors,
+    ));
 
     let total_bytes = categories.iter().map(|category| category.total_bytes).sum();
     let total_files = categories.iter().map(|category| category.total_files).sum();
@@ -294,6 +363,130 @@ fn scan_categories(app: AppHandle) -> Result<ScanResult, String> {
 
     write_json(&last_scan_path(&app)?, &scan_summary(&result))?;
     Ok(result)
+}
+
+#[tauri::command]
+async fn scan_system_data() -> Result<SystemDataResult, String> {
+    tauri::async_runtime::spawn_blocking(scan_system_data_blocking)
+        .await
+        .map_err(|error| format!("システムデータのスキャンに失敗しました: {error}"))?
+}
+
+fn scan_system_data_blocking() -> Result<SystemDataResult, String> {
+    Ok(scan_defined_data(system_data_definitions(), "system-data"))
+}
+
+#[tauri::command]
+async fn scan_document_data() -> Result<SystemDataResult, String> {
+    tauri::async_runtime::spawn_blocking(scan_document_data_blocking)
+        .await
+        .map_err(|error| format!("書類データのスキャンに失敗しました: {error}"))?
+}
+
+fn scan_document_data_blocking() -> Result<SystemDataResult, String> {
+    Ok(scan_defined_data(
+        document_data_definitions(),
+        "document-data",
+    ))
+}
+
+fn scan_defined_data(
+    definitions: Vec<SystemDataDefinition>,
+    result_prefix: &str,
+) -> SystemDataResult {
+    let started_at = now_iso();
+    let mut errors = Vec::new();
+    let categories: Vec<SystemDataCategory> = definitions
+        .iter()
+        .map(|definition| scan_system_data_category(definition, &mut errors))
+        .collect();
+    let total_bytes = categories.iter().map(|category| category.total_bytes).sum();
+    let total_items = categories.iter().map(|category| category.total_items).sum();
+    let unreadable_items = categories
+        .iter()
+        .map(|category| category.unreadable_items)
+        .sum();
+
+    SystemDataResult {
+        id: make_id(&format!("{result_prefix}-{started_at}")),
+        started_at,
+        finished_at: now_iso(),
+        total_bytes,
+        total_items,
+        unreadable_items,
+        categories,
+        errors,
+    }
+}
+
+fn scan_storage_data_category(
+    definitions: Vec<SystemDataDefinition>,
+    id: &str,
+    name: &str,
+    description: &str,
+    risk_level: RiskLevel,
+    item_warning: &str,
+    errors: &mut Vec<ScanError>,
+) -> CategoryResult {
+    let result = scan_defined_data(definitions, id);
+    errors.extend(result.errors.into_iter().map(|error| ScanError {
+        category_id: id.to_string(),
+        path: error.path,
+        message: error.message,
+    }));
+
+    let items = result
+        .categories
+        .iter()
+        .flat_map(|category| {
+            category.items.iter().map(move |item| {
+                storage_item_from_system_item(id, category.name.as_str(), item, item_warning)
+            })
+        })
+        .collect();
+
+    CategoryResult {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        risk_level,
+        total_bytes: result.total_bytes,
+        total_files: result.total_items,
+        default_selected: false,
+        items,
+    }
+}
+
+fn storage_item_from_system_item(
+    category_id: &str,
+    source_name: &str,
+    item: &SystemDataItem,
+    item_warning: &str,
+) -> CleanableItem {
+    let modified_at = item.modified_at.clone().unwrap_or_else(now_iso);
+    let deletable = item.scan_status != "unreadable" && item.bytes.is_some();
+    let warning = if item.scan_status == "readable" {
+        format!("{source_name} / {item_warning}")
+    } else {
+        let message = item
+            .message
+            .as_deref()
+            .unwrap_or("読み取れない項目があります");
+        format!("{source_name} / {message}")
+    };
+
+    CleanableItem {
+        id: make_id(&format!("storage-data:{category_id}:{}", item.id)),
+        path: item.path.clone(),
+        display_name: item.display_name.clone(),
+        bytes: item.bytes.unwrap_or(0),
+        modified_at: modified_at.clone(),
+        accessed_at: modified_at,
+        category_id: category_id.to_string(),
+        selected: false,
+        deletable,
+        warning: Some(warning),
+    }
 }
 
 #[tauri::command]
@@ -318,7 +511,7 @@ fn clean_items_blocking(app: AppHandle, request: CleanupRequest) -> Result<Clean
         let path = expand_tilde(&item.path);
         let path_string = path.to_string_lossy().to_string();
 
-        if is_protected_path(&path) {
+        if is_cleanup_protected_path(&item.category_id, &path) {
             batch.failures.push(CleanupFailure {
                 path: path_string,
                 category_id: item.category_id,
@@ -515,6 +708,8 @@ pub fn run() {
             get_app_state,
             save_settings,
             scan_categories,
+            scan_system_data,
+            scan_document_data,
             clean_items,
             open_in_finder,
             open_trash
@@ -554,6 +749,469 @@ fn category_definitions() -> Vec<CategoryDefinition> {
             scan_mode: ScanMode::TrashEntries,
         },
     ]
+}
+
+fn system_data_definitions() -> Vec<SystemDataDefinition> {
+    let home = home_dir();
+    vec![
+        SystemDataDefinition {
+            id: "system_caches",
+            name: "キャッシュ",
+            description: "macOSのシステムデータに含まれやすいユーザー、共有領域、システム領域のキャッシュです。",
+            roots: vec![
+                home.join("Library").join("Caches"),
+                home.join(".cache"),
+                PathBuf::from("/Library/Caches"),
+                PathBuf::from("/System/Library/Caches"),
+            ],
+        },
+        SystemDataDefinition {
+            id: "app_support_data",
+            name: "アプリ補助データ",
+            description: "アプリ本体ではなく、アプリが裏側で保持する補助データやコンテナです。",
+            roots: vec![
+                home.join("Library").join("Application Support"),
+                home.join("Library").join("Containers"),
+                home.join("Library").join("Group Containers"),
+                PathBuf::from("/Library/Application Support"),
+            ],
+        },
+        SystemDataDefinition {
+            id: "logs_diagnostics",
+            name: "ログ・診断",
+            description: "macOSとアプリが保存するログ、クラッシュレポート、診断データです。",
+            roots: vec![
+                home.join("Library").join("Logs"),
+                home.join("Library").join("DiagnosticReports"),
+                PathBuf::from("/Library/Logs"),
+                PathBuf::from("/private/var/log"),
+            ],
+        },
+        SystemDataDefinition {
+            id: "indexes_databases",
+            name: "インデックス・DB",
+            description: "Spotlight、検索、Siriなどが使うインデックスやローカルデータベースです。",
+            roots: vec![
+                home.join("Library").join("Metadata"),
+                home.join("Library").join("Suggestions"),
+                home.join("Library").join("PersonalizationPortrait"),
+                PathBuf::from("/.Spotlight-V100"),
+                PathBuf::from("/Library/Spotlight"),
+            ],
+        },
+        SystemDataDefinition {
+            id: "temporary_runtime",
+            name: "一時・実行時領域",
+            description: "一時ファイル、ソケット、ユーザーセッション中の実行時データです。",
+            roots: vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders")],
+        },
+        SystemDataDefinition {
+            id: "updates_installers",
+            name: "更新・インストーラ",
+            description: "macOSアップデート、インストーラ、関連する一時保存データです。",
+            roots: vec![
+                home.join("Library").join("Updates"),
+                PathBuf::from("/Library/Updates"),
+                PathBuf::from("/macOS Install Data"),
+            ],
+        },
+        SystemDataDefinition {
+            id: "system_runtime",
+            name: "システム実行領域",
+            description: "仮想メモリ、システムDB、共有キャッシュなどmacOSが管理するデータです。",
+            roots: vec![
+                PathBuf::from("/private/var/vm"),
+                PathBuf::from("/private/var/db"),
+            ],
+        },
+    ]
+}
+
+fn document_data_definitions() -> Vec<SystemDataDefinition> {
+    let home = home_dir();
+    vec![
+        SystemDataDefinition {
+            id: "documents_folder",
+            name: "書類",
+            description: "ユーザーのDocumentsフォルダにある文書、PDF、プロジェクト資料などです。",
+            roots: vec![home.join("Documents")],
+        },
+        SystemDataDefinition {
+            id: "desktop_files",
+            name: "デスクトップ",
+            description: "デスクトップに置かれたファイルやフォルダです。",
+            roots: vec![home.join("Desktop")],
+        },
+        SystemDataDefinition {
+            id: "downloads_files",
+            name: "ダウンロード",
+            description: "ダウンロードフォルダに残っているファイル、アーカイブ、インストーラです。",
+            roots: vec![home.join("Downloads")],
+        },
+        SystemDataDefinition {
+            id: "icloud_drive_documents",
+            name: "iCloud Drive",
+            description:
+                "iCloud Driveに同期される書類やフォルダです。ローカルに存在する範囲を集計します。",
+            roots: vec![home
+                .join("Library")
+                .join("Mobile Documents")
+                .join("com~apple~CloudDocs")],
+        },
+        SystemDataDefinition {
+            id: "shared_documents",
+            name: "共有書類",
+            description: "共有ユーザー領域やPublicフォルダにある書類データです。",
+            roots: vec![PathBuf::from("/Users/Shared"), home.join("Public")],
+        },
+    ]
+}
+
+fn scan_system_data_category(
+    definition: &SystemDataDefinition,
+    errors: &mut Vec<ScanError>,
+) -> SystemDataCategory {
+    let mut items = Vec::new();
+
+    for root in &definition.roots {
+        if !root.exists() {
+            continue;
+        }
+
+        let metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                push_system_scan_error(
+                    errors,
+                    definition.id,
+                    root.to_string_lossy().to_string(),
+                    error.to_string(),
+                );
+                items.push(unreadable_system_data_item(
+                    definition.id,
+                    root,
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+
+        if metadata.is_file() {
+            items.push(system_data_item_from_path(
+                definition.id,
+                root,
+                Some(metadata.len()),
+                &metadata,
+                "readable",
+                None,
+            ));
+            continue;
+        }
+
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                push_system_scan_error(
+                    errors,
+                    definition.id,
+                    root.to_string_lossy().to_string(),
+                    error.to_string(),
+                );
+                items.push(system_data_item_from_path(
+                    definition.id,
+                    root,
+                    None,
+                    &metadata,
+                    "unreadable",
+                    Some(error.to_string()),
+                ));
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    push_system_scan_error(
+                        errors,
+                        definition.id,
+                        root.to_string_lossy().to_string(),
+                        error.to_string(),
+                    );
+                    items.push(unreadable_system_data_item(
+                        definition.id,
+                        root,
+                        format!("配下の一部を読み取れませんでした: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    push_system_scan_error(
+                        errors,
+                        definition.id,
+                        path.to_string_lossy().to_string(),
+                        error.to_string(),
+                    );
+                    items.push(unreadable_system_data_item(
+                        definition.id,
+                        &path,
+                        error.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            if metadata.is_file() {
+                if metadata.len() == 0 {
+                    continue;
+                }
+                items.push(system_data_item_from_path(
+                    definition.id,
+                    &path,
+                    Some(metadata.len()),
+                    &metadata,
+                    "readable",
+                    None,
+                ));
+                continue;
+            }
+
+            if metadata.is_dir() {
+                let scan = system_path_size(&path, definition.id, errors);
+                if scan.bytes > 0 {
+                    let status = if scan.unreadable_items.is_empty() {
+                        "readable"
+                    } else {
+                        "partial"
+                    };
+                    let message = if scan.unreadable_items.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "配下に読み取れない項目が{}件あります。",
+                            scan.unreadable_items.len()
+                        ))
+                    };
+                    items.push(system_data_item_from_path(
+                        definition.id,
+                        &path,
+                        Some(scan.bytes),
+                        &metadata,
+                        status,
+                        message,
+                    ));
+                }
+                items.extend(scan.unreadable_items);
+            }
+        }
+    }
+
+    let total_bytes = items.iter().filter_map(|item| item.bytes).sum();
+    let total_items = items.len();
+    let unreadable_items = items
+        .iter()
+        .filter(|item| item.scan_status != "readable")
+        .count();
+    items.sort_by(|a, b| {
+        compare_system_item_size(a.bytes, b.bytes)
+            .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+    });
+    items.truncate(MAX_VISIBLE_SYSTEM_ITEMS);
+
+    SystemDataCategory {
+        id: definition.id.to_string(),
+        name: definition.name.to_string(),
+        description: definition.description.to_string(),
+        total_bytes,
+        total_items,
+        unreadable_items,
+        roots: definition
+            .roots
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+        items,
+    }
+}
+
+fn system_data_item_from_path(
+    category_id: &str,
+    path: &Path,
+    bytes: Option<u64>,
+    metadata: &fs::Metadata,
+    scan_status: &str,
+    message: Option<String>,
+) -> SystemDataItem {
+    let modified_at = metadata
+        .modified()
+        .map(system_time_to_iso)
+        .unwrap_or_else(|_| now_iso());
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    let item_type = if metadata.is_dir() {
+        "folder"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+
+    SystemDataItem {
+        id: make_id(&format!(
+            "system-data:{category_id}:{}",
+            path.to_string_lossy()
+        )),
+        path: path.to_string_lossy().to_string(),
+        display_name,
+        bytes,
+        modified_at: Some(modified_at),
+        item_type: item_type.to_string(),
+        category_id: category_id.to_string(),
+        scan_status: scan_status.to_string(),
+        message,
+    }
+}
+
+fn unreadable_system_data_item(category_id: &str, path: &Path, message: String) -> SystemDataItem {
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    SystemDataItem {
+        id: make_id(&format!(
+            "system-data-unreadable:{category_id}:{}:{message}",
+            path.to_string_lossy()
+        )),
+        path: path.to_string_lossy().to_string(),
+        display_name,
+        bytes: None,
+        modified_at: None,
+        item_type: "unknown".to_string(),
+        category_id: category_id.to_string(),
+        scan_status: "unreadable".to_string(),
+        message: Some(message),
+    }
+}
+
+#[derive(Default)]
+struct SystemPathScan {
+    bytes: u64,
+    unreadable_items: Vec<SystemDataItem>,
+}
+
+fn system_path_size(path: &Path, category_id: &str, errors: &mut Vec<ScanError>) -> SystemPathScan {
+    let mut scan = SystemPathScan::default();
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            push_system_scan_error(
+                errors,
+                category_id,
+                path.to_string_lossy().to_string(),
+                error.to_string(),
+            );
+            scan.unreadable_items.push(unreadable_system_data_item(
+                category_id,
+                path,
+                error.to_string(),
+            ));
+            return scan;
+        }
+    };
+
+    if metadata.is_file() {
+        scan.bytes = metadata.len();
+        return scan;
+    }
+
+    if !metadata.is_dir() {
+        return scan;
+    }
+
+    for entry in WalkDir::new(path).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let error_path = error
+                    .path()
+                    .map(|path| path.to_path_buf())
+                    .unwrap_or_else(|| path.to_path_buf());
+                push_system_scan_error(
+                    errors,
+                    category_id,
+                    error_path.to_string_lossy().to_string(),
+                    error.to_string(),
+                );
+                if scan.unreadable_items.len() < MAX_VISIBLE_SYSTEM_ITEMS {
+                    scan.unreadable_items.push(unreadable_system_data_item(
+                        category_id,
+                        &error_path,
+                        error.to_string(),
+                    ));
+                }
+                continue;
+            }
+        };
+
+        if entry.file_type().is_file() {
+            match fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => scan.bytes += metadata.len(),
+                Err(error) => {
+                    push_system_scan_error(
+                        errors,
+                        category_id,
+                        entry.path().to_string_lossy().to_string(),
+                        error.to_string(),
+                    );
+                    if scan.unreadable_items.len() < MAX_VISIBLE_SYSTEM_ITEMS {
+                        scan.unreadable_items.push(unreadable_system_data_item(
+                            category_id,
+                            entry.path(),
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    scan
+}
+
+fn push_system_scan_error(
+    errors: &mut Vec<ScanError>,
+    category_id: &str,
+    path: String,
+    message: String,
+) {
+    if errors.len() >= MAX_SYSTEM_SCAN_ERRORS {
+        return;
+    }
+
+    errors.push(ScanError {
+        category_id: category_id.to_string(),
+        path,
+        message,
+    });
+}
+
+fn compare_system_item_size(left: Option<u64>, right: Option<u64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 fn scan_recursive_files(
@@ -984,6 +1642,25 @@ fn is_protected_path(path: &Path) -> bool {
         .any(|protected| path.starts_with(protected))
 }
 
+fn is_cleanup_protected_path(category_id: &str, path: &Path) -> bool {
+    if has_component(path, ".git") {
+        return true;
+    }
+
+    let home = home_dir();
+    let critical = [
+        PathBuf::from("/System"),
+        PathBuf::from("/Applications"),
+        home.join("Applications"),
+    ];
+
+    if category_id == "document_data" || category_id == "system_data" {
+        return critical.iter().any(|protected| path.starts_with(protected));
+    }
+
+    is_protected_path(path)
+}
+
 fn has_component(path: &Path, needle: &str) -> bool {
     path.components().any(|component| match component {
         Component::Normal(value) => value == needle,
@@ -1059,6 +1736,23 @@ mod tests {
     }
 
     #[test]
+    fn storage_categories_can_cleanup_user_paths() {
+        let home = home_dir();
+        assert!(!is_cleanup_protected_path(
+            "document_data",
+            &home.join("Documents").join("memo.txt")
+        ));
+        assert!(!is_cleanup_protected_path(
+            "system_data",
+            &home.join("Library").join("Caches").join("sample.cache")
+        ));
+        assert!(is_cleanup_protected_path(
+            "system_data",
+            &PathBuf::from("/System/Library/Caches/sample.cache")
+        ));
+    }
+
+    #[test]
     fn expands_home_prefix() {
         assert_eq!(expand_tilde("~/Library"), home_dir().join("Library"));
         assert_eq!(expand_tilde("~"), home_dir());
@@ -1082,5 +1776,46 @@ mod tests {
         assert_eq!(settings.old_file_days, 1);
         assert_eq!(settings.min_size_bytes, 12);
         assert_eq!(settings.history_retention_days, 1);
+    }
+
+    #[test]
+    fn system_data_definitions_have_unique_ids() {
+        let definitions = system_data_definitions();
+        let mut ids = HashSet::new();
+        for definition in definitions {
+            assert!(
+                ids.insert(definition.id),
+                "duplicate system data definition: {}",
+                definition.id
+            );
+            assert!(!definition.roots.is_empty());
+        }
+    }
+
+    #[test]
+    fn document_data_definitions_have_unique_ids() {
+        let definitions = document_data_definitions();
+        let mut ids = HashSet::new();
+        for definition in definitions {
+            assert!(
+                ids.insert(definition.id),
+                "duplicate document data definition: {}",
+                definition.id
+            );
+            assert!(!definition.roots.is_empty());
+        }
+    }
+
+    #[test]
+    fn document_data_definitions_include_common_user_locations() {
+        let home = home_dir();
+        let roots: Vec<PathBuf> = document_data_definitions()
+            .into_iter()
+            .flat_map(|definition| definition.roots)
+            .collect();
+
+        assert!(roots.contains(&home.join("Documents")));
+        assert!(roots.contains(&home.join("Desktop")));
+        assert!(roots.contains(&home.join("Downloads")));
     }
 }

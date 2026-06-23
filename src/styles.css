@@ -472,6 +472,10 @@ input:disabled {
   gap: 12px;
 }
 
+.system-card-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .category-card h3 {
   margin: 0 0 5px;
   font-size: 16px;
@@ -528,6 +532,11 @@ input:disabled {
 .status-failed {
   color: #8c2f27;
   background: #f7d8d1;
+}
+
+.risk-locked {
+  color: #2e5578;
+  background: #dfeafa;
 }
 
 .details-column {
@@ -595,6 +604,10 @@ input:disabled {
   font-size: 13px;
 }
 
+.system-item-row {
+  grid-template-columns: minmax(0, 1fr) 96px 124px 64px;
+}
+
 .file-row:first-child {
   border-top: 0;
 }
@@ -632,6 +645,10 @@ input:disabled {
   font-style: normal;
 }
 
+.path-cell em.is-warning {
+  color: #8c2f27;
+}
+
 .icon-button {
   min-height: 30px;
   padding: 0 10px;
@@ -648,6 +665,30 @@ input:disabled {
 .table-note {
   margin: 8px 0 0;
   padding: 0;
+}
+
+.system-root-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.system-root-list span {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 28px;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #d6e5f7;
+  border-radius: 999px;
+  padding: 0 10px;
+  color: #50657c;
+  background: #f4f9ff;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scan-errors,
